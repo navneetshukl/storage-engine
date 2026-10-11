@@ -442,6 +442,75 @@ func (kv *KV) Close() error {
 	return kv.file.Close()
 }
 
+// Compact rewrites the log with only currently live key-value pairs.
+// This reduces file size and preserves value types.
+func (kv *KV) Compact() error {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	tmpPath := kv.path + ".compact"
+
+	tmp, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+
+	newIndex := make(map[string]int64, len(kv.index))
+	var newOffset int64
+
+	for key, offset := range kv.index {
+		vt, value, err := kv.readRecordValue(offset)
+		if err != nil {
+			tmp.Close()
+			return err
+		}
+
+		rec := encodeRecord(opPut, []byte(key), vt, value)
+
+		n, err := tmp.Write(rec)
+		if err != nil {
+			tmp.Close()
+			return err
+		}
+
+		if n != len(rec) {
+			tmp.Close()
+			return io.ErrShortWrite
+		}
+
+		newIndex[key] = newOffset
+		newOffset += int64(n)
+	}
+
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+
+	if err := kv.file.Close(); err != nil {
+		return err
+	}
+
+	if err := os.Rename(tmpPath, kv.path); err != nil {
+		return err
+	}
+
+	file, err := os.OpenFile(kv.path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+
+	kv.file = file
+	kv.index = newIndex
+	kv.size = newOffset
+
+	return nil
+}
+
 func main() {
 	db, err := Open("data/typed.log")
 	if err != nil {
